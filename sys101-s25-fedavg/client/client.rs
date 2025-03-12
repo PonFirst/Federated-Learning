@@ -1,8 +1,9 @@
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{DType, Result, Tensor, D, IndexOp};
 use candle_nn::{loss, ops, Optimizer, VarBuilder, VarMap, SGD};
 use candle_datasets::vision::Dataset;
-
 use candle_app::{LinearModel, Model};
+use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct Client {
     server_addr: String,
@@ -17,8 +18,17 @@ impl Client {
         }
     }
 
-    fn join(&mut self, server_ip: &str, model: &str) {
-        println!("Client joining server {} for model {}", server_ip, model);
+    async fn join(&mut self, server_ip: &str, _model: &str) -> Result<()> {
+        let mut stream = TcpStream::connect(server_ip).await?;
+        let message = format!("REGISTER|{}", "127.0.0.1:50001");
+        stream.write_all(message.as_bytes()).await?;
+        stream.flush().await?;
+
+        let mut buffer = [0; 1024];
+        let n = stream.read(&mut buffer).await?;
+        let response = String::from_utf8_lossy(&buffer[..n]);
+        println!("Server response: {}", response);
+        Ok(())
     }
 
     fn train(&mut self, dataset: &Dataset, epochs: usize, half: bool) -> Result<()> {
@@ -47,7 +57,7 @@ impl Client {
         let varmap = VarMap::new();
         let vs = VarBuilder::from_varmap(&varmap, DType::F32, &dev);
         let mut model = LinearModel::new(vs)?;
-        let sgd = SGD::new(varmap.all_vars(), 1.0)?;
+        let mut sgd = SGD::new(varmap.all_vars(), 1.0)?;
 
         for epoch in 1..=epochs {
             let logits = model.forward(&train_images)?;
@@ -86,9 +96,7 @@ impl Client {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut client = Client::new("127.0.0.1:50051");
-    client.join("127.0.0.1:50051", "mnist");
-    let dataset = candle_datasets::vision::mnist::load()?;
-    client.train(&dataset, 5, true)?;
-    println!("Client training complete.");
+    client.join("127.0.0.1:50051", "mnist").await?;
+    println!("Client setup complete.");
     Ok(())
 }
