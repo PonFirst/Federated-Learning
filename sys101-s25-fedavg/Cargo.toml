@@ -1,0 +1,14 @@
+[package]
+name = "candle-app"
+version = "0.1.1"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+candle-core = { version = "0.8.3", features = ["cuda"] }
+candle-nn = { version = "0.8.3" }
+candle-datasets = "0.8.3"
+hf-hub = { version = "0.4.2", features = ["tokio"] }
+clap = { version = "4.5.31", features = ["derive"] }
+anyhow = "1.0.96"
