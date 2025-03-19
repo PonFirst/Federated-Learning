@@ -17,6 +17,7 @@ pub struct LinearModel {
 
 impl LinearModel {
     pub fn new(vs: VarBuilder) -> Result<Self> {
+        let vs = vs.pp("linear");
         let linear = Linear::new(
             vs.get_with_hints((LABELS, IMAGE_DIM), "weight", candle_nn::init::DEFAULT_KAIMING_NORMAL)?,
             Some(vs.get_with_hints(LABELS, "bias", candle_nn::init::ZERO)?),
