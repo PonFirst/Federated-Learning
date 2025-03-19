@@ -2,7 +2,7 @@ use candle_core::{DType, Result as CandleResult, Tensor, D, IndexOp, Module};
 use candle_nn::{loss, ops, Optimizer, VarBuilder, VarMap, SGD};
 use candle_datasets::vision::Dataset;
 use candle_app::LinearModel;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, TcpListener};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use base64::Engine;
 use anyhow::Result;
@@ -32,7 +32,7 @@ impl Client {
         let message = format!("REGISTER|{}|{}", "127.0.0.1:50001", model);
         stream.write_all(message.as_bytes()).await?;
         stream.flush().await?;
-    
+
         let mut buffer = [0; 1024];
         let n = stream.read(&mut buffer).await?;
         let response = String::from_utf8_lossy(&buffer[..n]);
@@ -43,78 +43,68 @@ impl Client {
     }
 
     async fn run(&mut self, mut stream: TcpStream) -> Result<()> {
-        let request = format!("GET|{}", self.model_name);
-        stream.write_all(request.as_bytes()).await?;
+        let listener = TcpListener::bind("127.0.0.1:50001").await?;
+        println!("Client listening on 127.0.0.1:50001");
+
+        stream.write_all(b"READY").await?;
         stream.flush().await?;
-    
-        let mut buffer = [0; 65536];
+
         loop {
-            match stream.read(&mut buffer).await {
-                Ok(0) => {
-                    println!("Server disconnected");
-                    break;
-                }
+            let (mut client_stream, _) = listener.accept().await?;
+            let mut buffer = [0; 65536];
+            match client_stream.read(&mut buffer).await {
                 Ok(n) => {
-                    let response = String::from_utf8_lossy(&buffer[..n]);
-                    println!("Received from server: {}", response);
-                    let parts: Vec<&str> = response.split('|').collect();
-                    if parts.len() >= 3 && parts[0] == "MODEL" {
-                        let weights_bytes = base64::engine::general_purpose::STANDARD.decode(parts[1])?;
-                        let bias_bytes = base64::engine::general_purpose::STANDARD.decode(parts[2])?;
-                        let weights_data: Vec<f32> = bincode::deserialize(&weights_bytes)?;
-                        let bias_data: Vec<f32> = bincode::deserialize(&bias_bytes)?;
-    
+                    let message = String::from_utf8_lossy(&buffer[..n]);
+                    let parts: Vec<&str> = message.split('|').collect();
+                    if parts[0] == "TRAIN" && parts.len() == 4 {
+                        let weights_data: Vec<f32> = bincode::deserialize(
+                            &base64::engine::general_purpose::STANDARD.decode(parts[2])?,
+                        )?;
+                        let bias_data: Vec<f32> = bincode::deserialize(
+                            &base64::engine::general_purpose::STANDARD.decode(parts[3])?,
+                        )?;
+
                         let weights = Tensor::from_vec(weights_data, &[10, 784], &candle_core::Device::Cpu)?;
                         let bias = Tensor::from_vec(bias_data, &[10], &candle_core::Device::Cpu)?;
-    
                         let varmap = VarMap::new();
                         let vs = VarBuilder::from_varmap(&varmap, DType::F32, &candle_core::Device::Cpu);
                         let model = LinearModel::new(vs)?;
-    
                         {
                             let mut data = varmap.data().lock().unwrap();
                             data.get_mut("linear.weight")
-                                .expect("linear.weight missing")
+                                .unwrap()
                                 .set(&weights)?;
-                            data.get_mut("linear.bias")
-                                .expect("linear.bias missing")
-                                .set(&bias)?;
+                            data.get_mut("linear.bias").unwrap().set(&bias)?;
                         }
-    
                         self.model = Some((model, varmap));
                         self.status = "ready".to_string();
-                        println!("Global model received and loaded");
-    
-                        let dataset_arc = self.dataset.clone().unwrap();
-                        self.train(&*dataset_arc, 15, true).await?;
-    
+
+                        let dataset = self.dataset.clone().unwrap();
+                        self.train(&dataset, 5, false).await?; // Changed to false to use full dataset
+
                         let (_, varmap) = self.model.as_ref().unwrap();
                         let data = varmap.data().lock().unwrap();
-                        let weights_tensor = data.get("linear.weight").unwrap();
-                        let bias_tensor = data.get("linear.bias").unwrap();
-                        let weights_data = weights_tensor.to_vec2::<f32>()?.into_iter().flatten().collect::<Vec<f32>>();
-                        let bias_data = bias_tensor.to_vec1::<f32>()?;
+                        let weights_data = data
+                            .get("linear.weight")
+                            .unwrap()
+                            .to_vec2::<f32>()?
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<f32>>();
+                        let bias_data = data.get("linear.bias").unwrap().to_vec1::<f32>()?;
                         let response = format!(
                             "UPDATE|{}|{}",
                             base64::engine::general_purpose::STANDARD.encode(&bincode::serialize(&weights_data)?),
                             base64::engine::general_purpose::STANDARD.encode(&bincode::serialize(&bias_data)?)
                         );
-                        stream.write_all(response.as_bytes()).await?;
-                        stream.flush().await?;
-                    } else if response.trim() == "Update received" {
-                        println!("Server acknowledged update");
-                        break;
+                        client_stream.write_all(response.as_bytes()).await?;
+                        client_stream.flush().await?;
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error reading from server: {}", e);
-                    break;
-                }
+                Err(e) => eprintln!("Error reading from server: {}", e),
             }
         }
-        Ok(())
     }
-    
 
     async fn train(&mut self, dataset: &Dataset, epochs: usize, half: bool) -> CandleResult<()> {
         self.status = "training".to_string();
@@ -136,7 +126,7 @@ impl Client {
         };
 
         let (model, varmap) = self.model.as_mut().ok_or_else(|| candle_core::Error::Msg("No model available".into()))?;
-        let mut sgd = SGD::new(varmap.all_vars(), 0.01)?;
+        let mut sgd = SGD::new(varmap.all_vars(), 0.1)?; // Increased learning rate to 0.1
 
         for epoch in 1..=epochs {
             let logits = model.forward(&train_images)?;
