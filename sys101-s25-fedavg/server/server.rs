@@ -99,7 +99,7 @@ impl Server {
         Ok(())
     }
 
-    async fn train(&mut self, model_name: &str, rounds: usize) -> Result<()> {
+    async fn train(&mut self, model_name: &str, rounds: usize, epochs: usize) -> Result<()> {
         let (tx, mut rx) = mpsc::channel(32);
 
         for round in 1..=rounds {
@@ -138,12 +138,13 @@ impl Server {
                     match TcpStream::connect(&client_ip).await {
                         Ok(mut stream) => {
                             let train_message = format!(
-                                "TRAIN|{}|{}|{}",
+                                "TRAIN|{}|{}|{}|{}",
                                 model_name,
                                 base64::engine::general_purpose::STANDARD.encode(&weights),
-                                base64::engine::general_purpose::STANDARD.encode(&bias)
+                                base64::engine::general_purpose::STANDARD.encode(&bias),
+                                epochs
                             );
-                            println!("Sending TRAIN to {}", client_ip);
+                            println!("Sending TRAIN to {} with {} epochs", client_ip, epochs);
                             stream.write_all(train_message.as_bytes()).await?;
                             stream.flush().await?;
 
@@ -213,7 +214,7 @@ impl Server {
         println!("Handling client connection from {}", peer_addr);
         let mut client_listening_addr: Option<String> = None;
 
-        let mut stream = stream; // Make stream mutable for the loop
+        let mut stream = stream;
 
         loop {
             match stream.read(&mut buffer).await {
@@ -297,11 +298,9 @@ impl Server {
         if let Some((model, _, status)) = self.get_model(model_name) {
             let weights_data = model.weight()?.to_vec2::<f32>()?.into_iter().flatten().collect::<Vec<f32>>();
             let bias_data = model.bias()?.to_vec1::<f32>()?;
-            let weights_serialized = bincode::serialize(&weights_data)?;
-            let bias_serialized = bincode::serialize(&bias_data)?;
             println!("Model: {}", model_name);
-            println!("Weights: {:?}", weights_serialized);
-            println!("Bias: {:?}", bias_serialized);
+            println!("Weights: {:?}", weights_data);
+            println!("Bias: {:?}", bias_data);
             println!("Status: {}", status);
         } else {
             println!("Model '{}' not found", model_name);
@@ -320,7 +319,7 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind("127.0.0.1:50051").await?;
     println!("Server listening on 127.0.0.1:50051");
-    println!("Type 'GET <model_name>' to retrieve model parameters and status, 'TRAIN' to start training, or 'exit' to quit");
+    println!("Type 'TRAIN <rounds> <epochs>' to start training, 'GET <model_name>' to retrieve model parameters and status, or 'exit' to quit");
 
     let server_clone = Arc::clone(&server);
     tokio::spawn(async move {
@@ -361,18 +360,15 @@ async fn main() -> Result<()> {
         }
 
         match parts[0].to_uppercase().as_str() {
-            "GET" if parts.len() == 2 => {
-                let model_name = parts[1];
-                let server_guard = server.lock().await;
-                server_guard.handle_get_command(model_name)?;
-            }
-            "TRAIN" if parts.len() == 1 => {
+            "TRAIN" if parts.len() == 3 => {
+                let rounds = parts[1].parse::<usize>().map_err(|e| anyhow::anyhow!("Invalid rounds: {}", e))?;
+                let epochs = parts[2].parse::<usize>().map_err(|e| anyhow::anyhow!("Invalid epochs: {}", e))?;
                 let server_clone = Arc::clone(&server);
                 tokio::spawn(async move {
                     let mut server_guard = server_clone.lock().await;
                     let ready_count = server_guard.ready_clients.values().filter(|&&ready| ready).count();
-                    println!("Starting training with {} ready clients", ready_count);
-                    if let Err(e) = server_guard.train("mnist", 3).await {
+                    println!("Starting training with {} ready clients, {} rounds, {} epochs", ready_count, rounds, epochs);
+                    if let Err(e) = server_guard.train("mnist", rounds, epochs).await {
                         eprintln!("Training error: {}", e);
                     }
                     if let Ok(accuracy) = server_guard.test("mnist") {
@@ -391,8 +387,13 @@ async fn main() -> Result<()> {
                     Ok::<(), anyhow::Error>(())
                 });
             }
+            "GET" if parts.len() == 2 => {
+                let model_name = parts[1];
+                let server_guard = server.lock().await;
+                server_guard.handle_get_command(model_name)?;
+            }
             _ => {
-                println!("Invalid command. Use 'GET <model_name>', 'TRAIN', or 'exit'");
+                println!("Invalid command. Use 'TRAIN <rounds> <epochs>', 'GET <model_name>', or 'exit'");
             }
         }
     }

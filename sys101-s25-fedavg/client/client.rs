@@ -86,45 +86,44 @@ impl Client {
             match client_stream.read(&mut buffer).await {
                 Ok(n) => {
                     let message = String::from_utf8_lossy(&buffer[..n]);
-                    if message == "COMPLETE" {
+                    let parts: Vec<&str> = message.split('|').collect();
+                    if parts[0] == "TRAIN" && parts.len() == 5 {
+                        println!("Received TRAIN request for {} with {} epochs", parts[1], parts[4]);
+                        let weights_data: Vec<f32> = bincode::deserialize(
+                            &base64::engine::general_purpose::STANDARD.decode(parts[2])?,
+                        )?;
+                        let bias_data: Vec<f32> = bincode::deserialize(
+                            &base64::engine::general_purpose::STANDARD.decode(parts[3])?,
+                        )?;
+                        let epochs: usize = parts[4].parse().map_err(|e| anyhow::anyhow!("Invalid epochs: {}", e))?;
+
+                        let weights = Tensor::from_vec(weights_data, &[10, 784], &Device::Cpu)?;
+                        let bias = Tensor::from_vec(bias_data, &[10], &Device::Cpu)?;
+                        let varmap = VarMap::new();
+                        let vs = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+                        let mut model = LinearModel::new(vs)?;
+                        {
+                            let mut data = varmap.data().lock().unwrap();
+                            data.get_mut("linear.weight").unwrap().set(&weights)?;
+                            data.get_mut("linear.bias").unwrap().set(&bias)?;
+                        }
+
+                        train_model(&mut model, &varmap, &dataset, epochs).await?;
+
+                        let weights_data = model.weight()?.to_vec2::<f32>()?.into_iter().flatten().collect::<Vec<f32>>();
+                        let bias_data = model.bias()?.to_vec1::<f32>()?;
+
+                        let response = format!(
+                            "UPDATE|{}|{}",
+                            base64::engine::general_purpose::STANDARD.encode(&bincode::serialize(&weights_data)?),
+                            base64::engine::general_purpose::STANDARD.encode(&bincode::serialize(&bias_data)?)
+                        );
+                        client_stream.write_all(response.as_bytes()).await?;
+                        client_stream.flush().await?;
+                    } else if message == "COMPLETE" {
                         println!("Received from server: Training completed");
                     } else {
-                        let parts: Vec<&str> = message.split('|').collect();
-                        if parts[0] == "TRAIN" && parts.len() == 4 {
-                            println!("Received TRAIN request for {}", parts[1]);
-                            let weights_data: Vec<f32> = bincode::deserialize(
-                                &base64::engine::general_purpose::STANDARD.decode(parts[2])?,
-                            )?;
-                            let bias_data: Vec<f32> = bincode::deserialize(
-                                &base64::engine::general_purpose::STANDARD.decode(parts[3])?,
-                            )?;
-
-                            let weights = Tensor::from_vec(weights_data, &[10, 784], &Device::Cpu)?;
-                            let bias = Tensor::from_vec(bias_data, &[10], &Device::Cpu)?;
-                            let varmap = VarMap::new();
-                            let vs = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
-                            let mut model = LinearModel::new(vs)?;
-                            {
-                                let mut data = varmap.data().lock().unwrap();
-                                data.get_mut("linear.weight").unwrap().set(&weights)?;
-                                data.get_mut("linear.bias").unwrap().set(&bias)?;
-                            }
-
-                            train_model(&mut model, &varmap, &dataset, 10).await?;
-
-                            let weights_data = model.weight()?.to_vec2::<f32>()?.into_iter().flatten().collect::<Vec<f32>>();
-                            let bias_data = model.bias()?.to_vec1::<f32>()?;
-
-                            let response = format!(
-                                "UPDATE|{}|{}",
-                                base64::engine::general_purpose::STANDARD.encode(&bincode::serialize(&weights_data)?),
-                                base64::engine::general_purpose::STANDARD.encode(&bincode::serialize(&bias_data)?)
-                            );
-                            client_stream.write_all(response.as_bytes()).await?;
-                            client_stream.flush().await?;
-                        } else {
-                            println!("Received message: {}", message);
-                        }
+                        println!("Received message: {}", message);
                     }
                 }
                 Err(e) => eprintln!("Error reading from server: {}", e),
@@ -144,12 +143,12 @@ impl Client {
         let mut sgd = SGD::new(varmap.all_vars(), 0.1)?;
 
         for epoch in 1..=epochs {
-            let logits = Model::forward(model, &train_images)?;
+            let logits = Module::forward(model, &train_images)?; // Disambiguated
             let log_sm = ops::log_softmax(&logits, D::Minus1)?;
             let loss = loss::nll(&log_sm, &train_labels)?;
             sgd.backward_step(&loss)?;
 
-            let test_logits = Model::forward(model, &test_images)?;
+            let test_logits = Module::forward(model, &test_images)?; // Disambiguated
             let sum_ok = test_logits
                 .argmax(D::Minus1)?
                 .eq(&test_labels)?
@@ -178,7 +177,7 @@ impl Client {
         let test_labels = dataset.test_labels.to_dtype(DType::U32)?.to_device(&dev)?;
 
         let (model, _) = self.model.as_ref().ok_or_else(|| candle_core::Error::Msg("No model available".into()))?;
-        let logits = Model::forward(model, &test_images)?;
+        let logits = Module::forward(model, &test_images)?; // Disambiguated
         let sum_ok = logits
             .argmax(D::Minus1)?
             .eq(&test_labels)?
@@ -200,12 +199,12 @@ async fn train_model(model: &mut LinearModel, varmap: &VarMap, dataset: &Dataset
     let mut sgd = SGD::new(varmap.all_vars(), 0.1)?;
 
     for epoch in 1..=epochs {
-        let logits = Model::forward(model, &train_images)?;
+        let logits = Module::forward(model, &train_images)?; // Disambiguated
         let log_sm = ops::log_softmax(&logits, D::Minus1)?;
         let loss = loss::nll(&log_sm, &train_labels)?;
         sgd.backward_step(&loss)?;
 
-        let test_logits = Model::forward(model, &test_images)?;
+        let test_logits = Module::forward(model, &test_images)?; // Disambiguated
         let sum_ok = test_logits
             .argmax(D::Minus1)?
             .eq(&test_labels)?
