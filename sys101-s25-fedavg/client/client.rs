@@ -8,6 +8,8 @@ use base64::Engine;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 struct Client {
     server_addr: String,
@@ -18,7 +20,32 @@ struct Client {
 
 impl Client {
     fn new(server_addr: &str) -> Self {
-        let dataset = candle_datasets::vision::mnist::load().expect("Failed to load MNIST dataset");
+        let full_dataset = candle_datasets::vision::mnist::load().expect("Failed to load MNIST dataset");
+        
+        let mut rng = thread_rng();
+        let mut indices: Vec<usize> = (0..full_dataset.train_images.dim(0).unwrap()).collect();
+        indices.shuffle(&mut rng);
+        let selected_indices = &indices[..10_000];
+
+        let index_tensor = Tensor::from_vec(
+            selected_indices.iter().map(|&i| i as i64).collect::<Vec<i64>>(),
+            (10_000,),
+            &Device::Cpu,
+        ).unwrap();
+
+        // Select 10,000 random samples using the index tensor
+        let train_images = full_dataset.train_images.index_select(&index_tensor, 0).unwrap();
+        let train_labels = full_dataset.train_labels.index_select(&index_tensor, 0).unwrap();
+
+        // Create the dataset with the selected subset
+        let dataset = Dataset {
+            train_images,
+            train_labels,
+            test_images: full_dataset.test_images.clone(),
+            test_labels: full_dataset.test_labels.clone(),
+            labels: full_dataset.labels,
+        };
+
         Client {
             server_addr: server_addr.to_string(),
             model: None,
