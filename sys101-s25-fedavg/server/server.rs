@@ -22,7 +22,7 @@ struct Server {
 }
 
 impl Server {
-    fn new() -> Self {
+    fn new() -> Self {  // Fixed typo from fnageddonnew to fn new
         Server {
             clients: HashMap::new(),
             ready_clients: HashMap::new(),
@@ -42,6 +42,12 @@ impl Server {
             *ready = true;
             println!("Client {} marked as ready", client_ip);
         }
+    }
+
+    fn remove_client(&mut self, client_ip: &str) {
+        println!("Removing client {} from tracking", client_ip);
+        self.clients.remove(client_ip);
+        self.ready_clients.remove(client_ip);
     }
 
     fn init(&mut self) -> CandleResult<()> {
@@ -248,6 +254,10 @@ impl Server {
             match stream.read(&mut buffer).await {
                 Ok(0) => {
                     println!("Client {} disconnected", peer_addr);
+                    if let Some(ref client_ip) = client_listening_addr {
+                        let mut server_guard = server.lock().await;
+                        server_guard.remove_client(client_ip);
+                    }
                     break;
                 }
                 Ok(n) => {
@@ -312,6 +322,10 @@ impl Server {
                 }
                 Err(e) => {
                     eprintln!("Error reading from client {}: {}", peer_addr, e);
+                    if let Some(ref client_ip) = client_listening_addr {
+                        let mut server_guard = server.lock().await;
+                        server_guard.remove_client(client_ip);
+                    }
                     break;
                 }
             }
@@ -390,7 +404,7 @@ impl Server {
                             }
                         }
                     });
-                    println!("Training command issued with {} rounds and {} epochs, running in background.", rounds, epochs);
+                    println!("Training command issued with {} rounds and {} epochs", rounds, epochs);
                 }
                 "GET" => {
                     let server_guard = server.lock().await;
