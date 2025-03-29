@@ -11,6 +11,8 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use std::io::{self, Write};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 
 const MODEL_NAME: &str = "mnist";
 
@@ -22,7 +24,7 @@ struct Server {
 }
 
 impl Server {
-    fn new() -> Self {  // Fixed typo from fnageddonnew to fn new
+    fn new() -> Self {
         Server {
             clients: HashMap::new(),
             ready_clients: HashMap::new(),
@@ -103,7 +105,7 @@ impl Server {
         Ok(())
     }
 
-    async fn train(&self, rounds: usize, epochs: usize, server: Arc<Mutex<Self>>) -> Result<()> {
+    async fn train(&self, clients_to_use: usize, rounds: usize, epochs: usize, server: Arc<Mutex<Self>>) -> Result<()> {
         let (tx, mut rx) = mpsc::channel(32);
         {
             let mut server_guard = server.lock().await;
@@ -117,12 +119,25 @@ impl Server {
 
             let ready_clients: Vec<String> = {
                 let server_guard = server.lock().await;
-                server_guard.ready_clients
+                let mut clients = server_guard.ready_clients
                     .iter()
                     .filter(|&(_, &ready)| ready)
                     .map(|(ip, _)| ip.clone())
-                    .collect()
+                    .collect::<Vec<String>>();
+                
+                // Select clients based on the specified count
+                if clients.len() > clients_to_use {
+                    // Shuffle the clients to randomly select a subset
+                    let mut rng = thread_rng();
+                    clients.shuffle(&mut rng);
+                    clients.truncate(clients_to_use);
+                    println!("Using {} of {} available clients", clients_to_use, server_guard.ready_clients.len());
+                } else if clients.len() < clients_to_use {
+                    println!("Warning: Only {} clients available (requested {})", clients.len(), clients_to_use);
+                }
+                clients
             };
+            
             if ready_clients.is_empty() {
                 println!("No ready clients for round {}", round);
                 sleep(Duration::from_secs(1)).await;
@@ -348,7 +363,7 @@ impl Server {
     }
 
     async fn handle_commands(server: Arc<Mutex<Server>>) -> Result<()> {
-        println!("Type 'INIT', 'TRAIN <rounds> <epochs>', 'GET', 'TEST', or 'exit'");
+        println!("Type 'INIT', 'TRAIN <clients> <rounds> <epochs>', 'GET', 'TEST', or 'exit'");
         let stdin = tokio::io::stdin();
         let mut reader = BufReader::new(stdin);
         let mut input = String::new();
@@ -377,25 +392,40 @@ impl Server {
                         eprintln!("Init error: {}", e);
                     }
                 }
-                "TRAIN" if parts.len() == 3 => {
-                    let rounds = match parts[1].parse::<usize>() {
+                "TRAIN" => {
+                    if parts.len() != 4 {
+                        println!("Invalid TRAIN command. Use 'TRAIN <clients> <rounds> <epochs>'");
+                        continue;
+                    }
+                    
+                    let clients = match parts[1].parse::<usize>() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            println!("Invalid client count: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    let rounds = match parts[2].parse::<usize>() {
                         Ok(r) => r,
                         Err(e) => {
                             println!("Invalid rounds: {}", e);
                             continue;
                         }
                     };
-                    let epochs = match parts[2].parse::<usize>() {
+                    
+                    let epochs = match parts[3].parse::<usize>() {
                         Ok(e) => e,
                         Err(e) => {
                             println!("Invalid epochs: {}", e);
                             continue;
                         }
                     };
+                    
                     let server_clone = Arc::clone(&server);
                     let server_clone_for_train = Arc::clone(&server_clone);
                     tokio::spawn(async move {
-                        if let Err(e) = Server::train(&Server::new(), rounds, epochs, server_clone_for_train).await {
+                        if let Err(e) = Server::train(&Server::new(), clients, rounds, epochs, server_clone_for_train).await {
                             eprintln!("Training error: {}", e);
                         } else {
                             let server_guard = server_clone.lock().await;
@@ -404,7 +434,7 @@ impl Server {
                             }
                         }
                     });
-                    println!("Training command issued with {} rounds and {} epochs", rounds, epochs);
+                    println!("Training command issued with {} clients, {} rounds, and {} epochs", clients, rounds, epochs);
                 }
                 "GET" => {
                     let server_guard = server.lock().await;
@@ -418,7 +448,7 @@ impl Server {
                     }
                 }
                 _ => {
-                    println!("Invalid command. Use 'INIT', 'TRAIN <rounds> <epochs>', 'GET', 'TEST', or 'exit'");
+                    println!("Invalid command. Use 'INIT', 'TRAIN <clients> <rounds> <epochs>', 'GET', 'TEST', or 'exit'");
                 }
             }
         }
